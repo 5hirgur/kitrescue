@@ -1,0 +1,3 @@
+[submodule "vendor/NexArm"]
+	path = vendor/NexArm
+	url = https://github.com/Hiwonder/NexArm.git
