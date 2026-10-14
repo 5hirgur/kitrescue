@@ -1,0 +1,89 @@
+{
+  "roi_xywh": [
+    734,
+    469,
+    342,
+    309
+  ],
+  "neutral_xywh": null,
+  "parts": {
+    "black": {
+      "edge_mm": 30,
+      "mode": "achromatic",
+      "samples_xywh": [
+        [
+          823,
+          680,
+          30,
+          30
+        ],
+        [
+          813,
+          718,
+          26,
+          35
+        ],
+        [
+          850,
+          716,
+          13,
+          30
+        ]
+      ]
+    },
+    "orange": {
+      "edge_mm": 30,
+      "mode": "chromatic",
+      "samples_xywh": [
+        [
+          917,
+          719,
+          13,
+          17
+        ],
+        [
+          937,
+          673,
+          22,
+          27
+        ],
+        [
+          963,
+          712,
+          15,
+          13
+        ]
+      ]
+    },
+    "grey": {
+      "edge_mm": 30,
+      "mode": "achromatic",
+      "samples_xywh": [
+        [
+          884,
+          501,
+          15,
+          20
+        ],
+        [
+          869,
+          545,
+          23,
+          20
+        ],
+        [
+          908,
+          544,
+          20,
+          19
+        ]
+      ]
+    }
+  },
+  "image_wh": [
+    1920,
+    1080
+  ],
+  "source_image": "data/camera/current_processed.png",
+  "source_sha256": "812edff673498a6e1d90724907424c117f97007fbd74aa3bddb3b31050d33aaf"
+}

@@ -1,0 +1,22 @@
+{
+  "backend": "webcam",
+  "device": "/dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_A4177750-video-index0",
+  "width": 1920,
+  "height": 1080,
+  "fps": 30,
+  "mirror": false,
+  "warmup_seconds": 2.0,
+  "timeout_seconds": 5.0,
+  "controls": {
+    "power_line_frequency": 1,
+    "white_balance_automatic": 0,
+    "gain": 228,
+    "white_balance_temperature": 2354,
+    "zoom_absolute": 100,
+    "exposure_dynamic_framerate": 0,
+    "focus_automatic_continuous": 0,
+    "focus_absolute": 30,
+    "auto_exposure": 1,
+    "exposure_time_absolute": 156
+  }
+}
