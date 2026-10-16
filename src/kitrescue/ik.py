@@ -118,18 +118,46 @@ class NexArm:
                 )
         return {"before": before, "target": target, "solution": solution}
 
-    def execute(self, plan):
-        # A preview must still refer to the current reported arm pose.
+
+    def execute(self, plan, monitor=None):
         current = self.state()
+
         for key in ("x", "y", "z", "pitch", "roll"):
             if abs(current[key] - plan["before"][key]) > 3:
-                raise RuntimeError("Arm pose changed after planning; calculate again.")
+                raise RuntimeError(
+                    "Arm pose changed after planning; calculate again."
+                )
+
         target = plan["target"]
+
+        if monitor is not None:
+            monitor(current)
+
         self.board.set_arm_coords(**target, calc_only=False)
         self.claw_target = target["claw"]
         self.last_target = dict(target)
-        time.sleep(target["time_ms"] / 1000 + 0.7)
-        return self.state()
+
+        deadline = (
+            time.monotonic()
+            + target["time_ms"] / 1000
+            + 0.7
+        )
+
+        if monitor is None:
+            time.sleep(max(0, deadline - time.monotonic()))
+            return self.state()
+
+        # Prevents further waypoints, not a hardware emergency stop.
+        state = current
+
+        while time.monotonic() < deadline:
+            time.sleep(min(
+                .1, max(0, deadline - time.monotonic())
+            ))
+            state = self.state()
+            monitor(state)
+
+        return state
 
     def nudge(self, values, duration_ms=2000):
         return self.plan(values, relative=True, duration_ms=duration_ms)
