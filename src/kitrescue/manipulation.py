@@ -47,10 +47,10 @@ class Perception:
         self.cached = None
         self.destination = None
 
-    def snapshot(self):
+    def snapshot(self, preview=False):
         # One camera connection, shared by the task and browser.
         with self.lock:
-            if self.paused:
+            if self.paused or (preview and getattr(self, "_refreshing", False)):
                 if self.cached is None:
                     raise RuntimeError("Preview paused during robot movement")
                 return self.cached
@@ -61,6 +61,9 @@ class Perception:
                 image, self.profile, self.cal
             )
 
+            if getattr(self, "_park_frames", None) is not None:
+                self._park_frames.append((records, frame.received_at_ns))
+                self._park_frames = self._park_frames[-5:]
             self.cached = (
                 records,
                 overlay,
@@ -355,7 +358,7 @@ class WorkspaceView:
                         kind = "text/html"
 
                     elif route == "/frame.jpg":
-                        records, image, stamp = vision.snapshot()
+                        records, image, stamp = vision.snapshot(preview=True)
                         image = image.copy()
 
                         hull = np.float32(
@@ -996,12 +999,9 @@ class KitRescue:
             source = (
                 work["observed"][name]
                 if index == 0
-                else self.fresh_observation(
-                    name, work["observed"][name]
-                )
+                else self.refresh_at_park(name, work["observed"][name], top_name)
             )
-            if top_image is not None:
-                self.check_stack_image(top_name, top_image)
+            
 
             route = self.oriented_steps(transfer, work, source)
             self.preflight(route)
@@ -1042,11 +1042,7 @@ class KitRescue:
             ))
             top_name = name
 
-            if index + 1 < len(work["transfers"]):
-                # Empty gripper has returned to park.
-                # Raised stack tops are checked in image pixels only.
-                self.require_park()
-                top_image = self.vision.track(top_name)
+            
 
         result = dict(
             work,
@@ -1057,6 +1053,48 @@ class KitRescue:
         )
         write_json(self.log_dir / "result.json", result)
         return result
+
+
+    def refresh_at_park(self, name, original, top_name):
+        self.require_park()
+        started = time.monotonic()
+        print("Park: checking next cube and stack in one camera batch...", flush=True)
+        with self.vision.lock:
+            self.vision._refreshing = True
+            self.vision._park_frames = []
+        try:
+            observations, _ = self.vision.observe([name])
+            current = observations[name]
+            self.validate_refresh(name, current, original)
+            with self.vision.lock:
+                frames = list(self.vision._park_frames)
+            if len(frames) != 5 or len({stamp for _, stamp in frames}) != 5:
+                raise RuntimeError("Need five fresh park frames")
+            points = []
+            for records, stamp in frames:
+                matches = [r for r in records if r["colour"] == top_name]
+                if len(matches) != 1:
+                    raise RuntimeError("Cannot see one stack-top region: " + top_name)
+                points.append(matches[0]["silhouette_center_px"])
+            points = np.asarray(points, dtype=float)
+            if points.shape != (5, 2) or not np.isfinite(points).all():
+                raise RuntimeError("Invalid stack-top pixels")
+            spread = float(np.linalg.norm(
+                points[:, None] - points[None, :], axis=2
+            ).max())
+            if spread > 12:
+                raise RuntimeError("Stack image unstable; spread exceeds 12 pixels")
+            print(
+                f"Park recheck: {time.monotonic()-started:.2f} s; "
+                f"stack spread {spread:.2f} px",
+                flush=True,
+            )
+            return current
+        finally:
+            with self.vision.lock:
+                self.vision._park_frames = None
+                self.vision._refreshing = False
+
 
 
 
@@ -1097,6 +1135,7 @@ def task_main():
         "--colour-profile",
         default=str(ROOT / "config/cube_colours.json")
     )
+    parser.add_argument("--fast", action="store_true", help="Faster raised travel; retain slow contact and motion guards")
     args = parser.parse_args()
 
     if args.one_confirm and (
@@ -1170,6 +1209,7 @@ def task_main():
                     arm, vision, cal,
                     args.duration_ms, args.allow_unvalidated
                 )
+                robot.fast_motion = args.fast
                 if args.execute:
                     input(
                         "Gripper EMPTY, raised above travel Z, routes clear. "
@@ -1284,6 +1324,7 @@ def maintenance_main(argv):
     )
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--one-confirm", action="store_true")
+    parser.add_argument("--fast", action="store_true", help="Faster raised travel; retain slow contact and motion guards")
     args = parser.parse_args(argv)
 
     if (args.operation == "test-motion") != (args.axis is not None):
@@ -1297,6 +1338,7 @@ def maintenance_main(argv):
             arm, None, cal, args.duration_ms,
             allow_unvalidated=True,
         )
+        robot.fast_motion = args.fast
         motion = robot.controller()
         print("Current state:", json.dumps(arm.state()))
         print(

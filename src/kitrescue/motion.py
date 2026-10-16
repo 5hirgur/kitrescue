@@ -120,6 +120,22 @@ class Motion:
             )
         plan["target"]["time_ms"] = duration
 
+        if getattr(self.r, "fast_motion", False):
+            slow_z = getattr(self, "_slow_zone", None)
+            contact = slow_z is not None and min(before["z"], target["z"]) <= slow_z
+            plan["fast_profile"] = {
+                "contact": contact,
+                "minimum": minimum,
+                "tolerance": {
+                    "x": FEEDBACK_TOLERANCES["contact_xy_mm"] if precise else FEEDBACK_TOLERANCES["travel_mm"],
+                    "y": FEEDBACK_TOLERANCES["contact_xy_mm"] if precise else FEEDBACK_TOLERANCES["travel_mm"],
+                    "z": FEEDBACK_TOLERANCES["contact_z_mm"] if precise else self.travel_tolerance("z", before, target),
+                    "pitch": FEEDBACK_TOLERANCES["pitch_deg"],
+                    "roll": FEEDBACK_TOLERANCES["roll_deg"],
+                },
+            }
+            plan["target"]["time_ms"] = max(5000, self.r.duration)
+
         readings = []
         lateral = math.dist(
             [before["x"], before["y"]],
@@ -177,7 +193,7 @@ class Motion:
                 )
                 if quiet:
                     break
-                time.sleep(.25)
+                time.sleep(.08 if getattr(self.r, "fast_motion", False) and not precise else .25)
             else:
                 raise RuntimeError("Feedback did not settle")
 
@@ -212,7 +228,7 @@ class Motion:
             allowed = {
                 "x": FEEDBACK_TOLERANCES["contact_xy_mm"] if precise else FEEDBACK_TOLERANCES["travel_mm"],
                 "y": FEEDBACK_TOLERANCES["contact_xy_mm"] if precise else FEEDBACK_TOLERANCES["travel_mm"],
-                "z": FEEDBACK_TOLERANCES["contact_z_mm"] if precise else FEEDBACK_TOLERANCES["travel_mm"],
+                "z": FEEDBACK_TOLERANCES["contact_z_mm"] if precise else self.travel_tolerance("z", before, target),
                 "pitch": FEEDBACK_TOLERANCES["pitch_deg"],
                 "roll": FEEDBACK_TOLERANCES["roll_deg"],
             }
@@ -230,7 +246,10 @@ class Motion:
                 (after["z"] - before["z"])
                 * (1 if dz > 0 else -1)
             )
-            if abs(dz) >= 15 and progress < abs(dz) / 2:
+            required_progress = abs(dz) / 2
+            if getattr(self.r, "fast_motion", False) and allowed["z"] == 16:
+                required_progress = max(5, abs(dz) - allowed["z"])
+            if abs(dz) >= 15 and progress < required_progress:
                 raise RuntimeError(
                     "Insufficient measured vertical progress"
                 )
@@ -279,6 +298,11 @@ class Motion:
         self, current, values, label, maximum,
         maintenance=False, minimum=None
     ):
+        if getattr(self.r, "fast_motion", False):
+            slow_z = getattr(self, "_slow_zone", None)
+            raised = slow_z is None or min(current["z"], values.get("z", current["z"])) > slow_z
+            if raised and any(k in values for k in ("x", "y", "z")):
+                maximum = max(maximum, 40)
         origin = dict(current)
         command_origin = dict(current)
         count = max(1, math.ceil(
@@ -369,6 +393,7 @@ class Motion:
         return current
 
     def park(self):
+        self._slow_zone = None
         if self.is_parked():
             print("Already at camera_clear.")
             return
@@ -417,6 +442,12 @@ class Motion:
             ({"z": p["z"]}, 20, "park_height"),
         )
         for values, maximum, label in phases:
+            if (label == "park_pitch"
+                    and self.pitch_limits[0] <= s["pitch"] <= self.pitch_limits[1]
+                    and abs(s["pitch"] - p["pitch"]) <= FEEDBACK_TOLERANCES["pitch_deg"]):
+                current["pitch"] = p["pitch"]
+                print("Park: pitch already within tracking tolerance; continuing.", flush=True)
+                continue
             if any(
                 abs(current[k] - v) > .1
                 for k, v in values.items()
@@ -438,6 +469,12 @@ class Motion:
     def move(self, step):
         target = self.state_pose(step["pose"])
         measured = self.arm.state()
+        action = step["action"].split(":")[0]
+        self._slow_zone = (
+            min(measured["z"], target["z"]) + 20
+            if action in ("grasp_height", "place_height", "lift", "retract")
+            else None
+        )
         clear = max(
             self.r.base["z"] + 50,
             step.get("minimum_z") or 5,
@@ -463,7 +500,7 @@ class Motion:
 
         if previous is not None and any(
             abs(measured[k] - current[k])
-            > FEEDBACK_TOLERANCES["travel_mm"]
+            > self.travel_tolerance(k, measured, current)
             for k in ("x", "y", "z")
         ):
             raise RuntimeError(
@@ -518,6 +555,7 @@ class Motion:
         )
 
     def test(self, axis):
+        self._slow_zone = None
         self.require_park()
         before = self.arm.state()
         origin = self.park_pose()
@@ -647,4 +685,12 @@ class Motion:
                 )
 
         return monitor
+
+
+    def travel_tolerance(self, key, before, target):
+        if (key == "z" and getattr(self.r, "fast_motion", False)
+                and min(before["z"], target["z"]) >= self.r.base["z"] + 50):
+            return 16
+        return FEEDBACK_TOLERANCES["travel_mm"]
+
 

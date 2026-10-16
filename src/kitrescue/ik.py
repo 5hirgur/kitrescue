@@ -250,11 +250,13 @@ class NexArm:
             if stationary_arm:
                 distance = 0
 
-            near = min(current["z"], target["z"]) < 100
+            profile = plan.get("fast_profile", {})
+            fast = bool(profile)
+            near = bool(profile["contact"]) if fast else min(current["z"], target["z"]) < 100
             seconds = max(
                 .8,
                 2 * largest / (160 if near else 240),
-                2 * distance / (10 if near else 35),
+                2 * distance / (10 if near else (70 if fast else 35)),
                 abs(goals[5] - start[5]) / 400,
             )
 
@@ -296,7 +298,11 @@ class NexArm:
             self.claw_target = target["claw"]
             self.last_target = dict(target)
 
-            deadline = time.monotonic() + duration / 1000 + .7
+            samples = []
+            changing_claw = abs(target["claw"] - anchor["claw"]) > .05
+            tolerance = profile.get("tolerance", {})
+            sent_at = time.monotonic()
+            deadline = sent_at + duration / 1000 + .7
             state = current
 
             while time.monotonic() < deadline:
@@ -318,6 +324,31 @@ class NexArm:
 
                 if monitor is not None:
                     monitor(state)
+                if fast and not changing_claw:
+                    samples.append(list(state["servos"][:5]))
+                    samples = samples[-3:]
+                    quiet = len(samples) == 3 and all(
+                        max(q[i] for q in samples) - min(q[i] for q in samples) <= 1
+                        for i in range(5)
+                    )
+                    reached = all(
+                        abs(state[k] - target[k]) <= tolerance[k]
+                        for k in tolerance
+                    )
+                    progressed = largest < 12 or max(
+                        abs(state["servos"][i] - start[i]) for i in range(5)
+                    ) >= largest / 2
+                    dz = target["z"] - current["z"]
+                    if abs(dz) >= 15:
+                        progressed = progressed and (
+                            (state["z"] - current["z"]) * (1 if dz > 0 else -1)
+                            >= abs(dz) / 2
+                        )
+                    clear = profile.get("minimum") is None or state["z"] >= profile["minimum"]
+                    if (time.monotonic() - sent_at >= .4 and quiet and reached
+                            and progressed and clear
+                            and max(abs(state["servos"][i]-goals[i]) for i in range(5)) <= 20):
+                        break
 
             errors = [
                 state["servos"][i] - goals[i] for i in range(5)
