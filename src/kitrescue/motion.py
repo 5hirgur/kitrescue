@@ -129,7 +129,10 @@ class Motion:
         floor = max(
             5, min(before["z"], target["z"]) - 10
         )
-        if lateral and minimum is not None:
+        if (
+            minimum is not None
+            and min(before["z"], target["z"]) >= minimum
+        ):
             floor = max(floor, minimum)
 
         def monitor(s):
@@ -147,12 +150,18 @@ class Motion:
                     f"Z={s['z']}, floor={floor}"
                 )
 
+            # Command-anchored transfers: bounded raised transients.
+            transient = (
+                10 if not maintenance and min(
+                    before["z"], target["z"], s["z"]
+                ) >= self.r.base["z"] + 50 else 6
+            )
             pitch_lo = min(
                 before["pitch"], target["pitch"]
-            ) - 6
+            ) - transient
             pitch_hi = max(
                 before["pitch"], target["pitch"]
-            ) + 6
+            ) + transient
             if not pitch_lo <= s["pitch"] <= pitch_hi:
                 raise RuntimeError(
                     "Pitch left the commanded transition"
@@ -160,7 +169,7 @@ class Motion:
 
             if (
                 not maintenance
-                and abs(s["pitch"] - self.r.base["pitch"]) > 6
+                and abs(s["pitch"] - self.r.base["pitch"]) > transient
             ):
                 raise RuntimeError("Top-down pitch deviation")
 
@@ -207,7 +216,25 @@ class Motion:
 
         try:
             # One command, then feedback. No automatic motion retry.
-            after = self.arm.execute(plan, monitor=monitor)
+            previous = getattr(self.arm, "last_target", None)
+            same_command = previous is not None and all(
+                abs(previous[k] - target[k]) < .05
+                for k in FIELDS
+            )
+            if same_command:
+                after = before
+                monitor(after)
+            else:
+                self.r.log_dir.mkdir(parents=True, exist_ok=True)
+                (
+                    self.r.log_dir / "active_command.json"
+                ).write_text(json.dumps({
+                    "action": label,
+                    "target": plan["target"],
+                    "before": before,
+                    "ik_solution": plan["solution"],
+                }, indent=2))
+                after = self.arm.execute_joints(plan, monitor=monitor)
             recent = []
             deadline = time.monotonic() + 3
 
@@ -330,6 +357,7 @@ class Motion:
         maintenance=False, minimum=None
     ):
         origin = dict(current)
+        command_origin = dict(current)
         count = max(1, math.ceil(
             max(
                 abs(values[k] - origin[k])
@@ -356,7 +384,7 @@ class Motion:
         # Preflight this leg; subdivide only when IK joint
         # changes require it.
         previous = self.arm.state()["servos"]
-        origin = self.state_pose(self.arm.state())
+        origin = dict(command_origin)
         route = []
 
         def expand(a, b, pulses, depth=0):
@@ -486,74 +514,80 @@ class Motion:
 
     def move(self, step):
         target = self.state_pose(step["pose"])
-        s = self.arm.state()
-
-        if abs(
-            s["pitch"] - self.r.base["pitch"]
-        ) > 6:
-            raise RuntimeError(
-                "Starting pose is not top-down"
-            )
-
-        current = self.state_pose(s)
-        latched = getattr(
-            self.arm, "claw_target", None
-        )
-        if latched is not None:
-            current["claw"] = latched
-        current["pitch"] = self.r.base["pitch"]
-
-        minimum = step.get("minimum_z")
+        measured = self.arm.state()
         clear = max(
             self.r.base["z"] + 50,
-            minimum or 5,
+            step.get("minimum_z") or 5,
         )
+        pitch_allowance = 10 if measured["z"] >= clear else 6
+        if abs(
+            measured["pitch"] - self.r.base["pitch"]
+        ) > pitch_allowance:
+            raise RuntimeError(
+                "Starting top-down orientation outside tracking allowance"
+            )
+        if measured["z"] < 5 or not -90 <= measured["roll"] <= 90:
+            raise RuntimeError("Starting Z/wrist outside bounds")
+
+        previous = getattr(self.arm, "last_target", None)
+        current = self.state_pose(
+            previous if previous is not None else measured
+        )
+        current["pitch"] = self.r.base["pitch"]
+        latched = getattr(self.arm, "claw_target", None)
+        if latched is not None:
+            current["claw"] = latched
+
+        if previous is not None and any(
+            abs(measured[k] - current[k])
+            > FEEDBACK_TOLERANCES["travel_mm"]
+            for k in ("x", "y", "z")
+        ):
+            raise RuntimeError(
+                "Measured pose diverged from last command; "
+                "no new movement sent"
+            )
+
         lateral = math.dist(
             [current["x"], current["y"]],
             [target["x"], target["y"]],
-        ) > 3
-        rotate = abs(
-            current["roll"] - target["roll"]
-        ) > 3
+        ) > .1
+        rotate = abs(current["roll"] - target["roll"]) > .1
 
-        if (
-            (lateral or rotate)
-            and current["z"] < clear
-        ):
-            if target["z"] < clear:
+        if lateral or rotate:
+            if min(measured["z"], current["z"]) < clear:
                 raise RuntimeError(
-                    "XY/wrist correction blocked near contact"
+                    "Insufficient measured clearance for XY/wrist movement"
                 )
-            current = self.interpolate(
-                current, {"z": clear + 10},
-                step["action"] + ":raise", 20,
-            )
 
         if rotate:
             current = self.interpolate(
                 current, {"roll": target["roll"]},
-                step["action"] + ":wrist", 10,
-                minimum=clear,
+                step["action"] + ":wrist",
+                10, minimum=clear,
             )
-
         if lateral:
             current = self.interpolate(
                 current,
                 {"x": target["x"], "y": target["y"]},
-                step["action"] + ":xy", 30,
-                minimum=clear,
+                step["action"] + ":xy",
+                30, minimum=clear,
             )
-
         if current["z"] != target["z"]:
+            travel_minimum = step.get("minimum_z")
+            if min(
+                measured["z"], target["z"]
+            ) < (travel_minimum or 5):
+                travel_minimum = None
             current = self.interpolate(
                 current, {"z": target["z"]},
-                step["action"] + ":z", 20,
+                step["action"] + ":z",
+                20, minimum=travel_minimum,
             )
 
-        self.segment(
-            target,
-            step["action"] + ":settle",
-            minimum=minimum,
+        return self.segment(
+            target, step["action"] + ":settle",
+            minimum=step.get("minimum_z"),
             precise=step["action"] in (
                 "grasp_height", "close",
                 "place_height", "release",

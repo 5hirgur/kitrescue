@@ -976,170 +976,50 @@ class KitRescue:
                 )
 
     def execute_plan(self, report, step_mode=False):
-        """Refresh targets and align the wrist before descent."""
+        """Observe from park only; freeze each transfer through release."""
         if self.last_plan is None or report != self.last_plan:
             raise ValueError(
-                "Plan is missing or changed; call plan_task again"
+                "Plan missing or changed; call plan_task again"
             )
-
         self.last_plan = None
         self.require_park()
-
         work = copy.deepcopy(report)
-        top_name = work["base_left_in_place"]
-        target_anchor = work["observed"].get(top_name)
-        top_image = None
         executed = []
+        top_name = work["base_left_in_place"]
+        top_image = None
 
-        for transfer in work["transfers"]:
+        for index, transfer in enumerate(work["transfers"]):
             self.require_park()
             name = transfer["object"]
 
-            source = self.fresh_observation(
-                name, work["observed"][name]
-            )
-
-            # At layer 2, the supporting cube top is still at 30 mm.
-            if top_name and transfer["layer"] == 1:
-                base = self.fresh_observation(
-                    top_name, target_anchor
+            # Initial observations were already captured at park.
+            source = (
+                work["observed"][name]
+                if index == 0
+                else self.fresh_observation(
+                    name, work["observed"][name]
                 )
-                work["destination_xy"] = self.xy(base["xy"])
-                work["destination_angle_deg"] = base["angle_deg"]
-
-            elif top_image is not None:
+            )
+            if top_image is not None:
                 self.check_stack_image(top_name, top_image)
 
-            elif transfer["layer"] == 0:
-                work["destination_angle_deg"] = source["angle_deg"]
-
-            if math.dist(
-                source["xy"], work["destination_xy"]
-            ) < SEPARATION:
-                raise RuntimeError(
-                    "Refreshed source and destination are too close"
-                )
-
-            self.vision.destination = work["destination_xy"]
-            route = self.oriented_steps(
-                transfer, work, source
-            )
+            route = self.oriented_steps(transfer, work, source)
             self.preflight(route)
-
             print(
-                f"Moving {name} to layer {transfer['layer'] + 1}",
+                f"Moving {name} to layer {transfer['layer'] + 1}; "
+                "targets frozen",
                 flush=True,
             )
 
             with self.vision.lock:
                 self.vision.paused = True
-
             try:
-                index = 0
-
-                while index < len(route):
-                    label = route[index]["action"]
-
-                    if label == "grasp_height":
-                        # Inspect again at approach height.
-                        try:
-                            new_source = self.camera_read(
-                                lambda: self.vision.observe([name])[0][name]
-                            )
-
-                        except ValueError:
-                            # If obscured, inspect from camera_clear.
-                            self.inspection_park(route, OPEN)
-
-                            new_source = self.camera_read(
-                                lambda: self.vision.observe([name])[0][name]
-                            )
-                            self.validate_refresh(
-                                name, new_source, work["observed"][name]
-                            )
-
-                            route = self.oriented_steps(
-                                transfer, work, new_source
-                            )
-                            self.preflight(route)
-
-                            for approach in route[:2]:
-                                self.move(approach)
-
-                        self.validate_refresh(
-                            name, new_source, work["observed"][name]
-                        )
-
-                        updated = self.oriented_steps(
-                            transfer, work, new_source
-                        )
-                        self.preflight(updated)
-
-                        if updated[1]["pose"] != route[1]["pose"]:
-                            self.move(updated[1])
-
-                        route = updated
-                        source = new_source
-
-                    elif label == "carry":
-                        # Check destination after pickup, before placing.
-                        def read_destination():
-                            if top_name and transfer["layer"] == 1:
-                                return self.fresh_observation(
-                                    top_name, target_anchor
-                                )
-
-                            if top_image is not None:
-                                self.check_stack_image(
-                                    top_name, top_image
-                                )
-                            else:
-                                records, _, _ = self.vision.snapshot()
-                                self.require_empty(
-                                    work["destination_xy"],
-                                    records,
-                                    name,
-                                )
-                            return None
-
-                        try:
-                            new_base = self.camera_read(read_destination)
-
-                        except ValueError:
-                            # Keep the grip closed during inspection.
-                            self.inspection_park(route, CLOSED)
-                            new_base = self.camera_read(read_destination)
-
-                        if new_base is not None:
-                            work["destination_xy"] = self.xy(
-                                new_base["xy"]
-                            )
-                            work["destination_angle_deg"] = (
-                                new_base["angle_deg"]
-                            )
-
-                        if math.dist(
-                            source["xy"], work["destination_xy"]
-                        ) < SEPARATION:
-                            raise RuntimeError(
-                                "Destination moved too close to pickup"
-                            )
-
-                        self.vision.destination = work["destination_xy"]
-                        route = self.oriented_steps(
-                            transfer, work, source
-                        )
-                        self.preflight(route[index:])
-
+                for step in route:
                     if step_mode:
                         input(
-                            f"{route[index]['action']}. "
-                            "Check route/held cube; hands clear, Enter: "
+                            f"{step['action']}; hands clear, Enter: "
                         )
-
-                    self.move(route[index])
-                    index += 1
-
+                    self.move(step)
             finally:
                 with self.vision.lock:
                     self.vision.paused = False
@@ -1149,16 +1029,12 @@ class KitRescue:
                 steps=route,
                 source_observation=source,
             ))
-
             top_name = name
-            target_anchor = {
-                "xy": work["destination_xy"],
-                "angle_deg": work["destination_angle_deg"],
-            }
 
-            if len(executed) < len(work["transfers"]):
-                # Image reference at the new height.
-                # Do not map raised tops through the table homography.
+            if index + 1 < len(work["transfers"]):
+                # Empty gripper has returned to park.
+                # Raised stack tops are checked in image pixels only.
+                self.require_park()
                 top_image = self.vision.track(top_name)
 
         result = dict(
@@ -1166,6 +1042,7 @@ class KitRescue:
             transfers=executed,
             status="motion_completed",
             physical_success_verified=False,
+            camera_policy="park_only",
         )
         write_json(self.log_dir / "result.json", result)
         return result
@@ -1441,7 +1318,142 @@ def maintenance_main(argv):
         print("Completed. Inspect the physical pose.")
 
 
+
+def enable_run_logging():
+    """Record console output, host writes and returned robot states."""
+    import atexit
+    import sys
+    from functools import wraps
+
+    path = ROOT / "data/manipulation/latest_run.log"
+    if getattr(NexArm, "_kitrescue_trace_ready", False):
+        return path
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sink = path.open("w", buffering=1)
+    lock = threading.RLock()
+    stdout, stderr = sys.stdout, sys.stderr
+    counter = [0]
+
+    def record(kind, **data):
+        with lock:
+            counter[0] += 1
+            sink.write(json.dumps(dict(
+                event=counter[0],
+                host_ns=time.time_ns(),
+                monotonic_ns=time.monotonic_ns(),
+                kind=kind,
+                **data
+            ), default=str) + "\n")
+
+    class Tee:
+        def __init__(self, original):
+            self.original = original
+
+        def write(self, text):
+            with lock:
+                result = self.original.write(text)
+                sink.write(text)
+                return result
+
+        def flush(self):
+            with lock:
+                self.original.flush()
+                sink.flush()
+
+        def __getattr__(self, name):
+            return getattr(self.original, name)
+
+    sys.stdout, sys.stderr = Tee(stdout), Tee(stderr)
+
+    def finish():
+        sys.stdout, sys.stderr = stdout, stderr
+        sink.close()
+
+    atexit.register(finish)
+
+    old_init = NexArm.__init__
+
+    @wraps(old_init)
+    def traced_init(self, *args, **kwargs):
+        old_init(self, *args, **kwargs)
+        port = self.board.port
+        old_write = port.write
+
+        def traced_write(data):
+            raw = bytes(data)
+            record("TX_ATTEMPT", hex=raw.hex(" "))
+            try:
+                count = old_write(data)
+            except BaseException as exc:
+                record("TX_ERROR", error=repr(exc))
+                raise
+            record(
+                "TX_RETURN",
+                bytes_written=count,
+                expected=len(raw),
+            )
+            return count
+
+        port.write = traced_write
+        record(
+            "CONNECTED",
+            device=str(getattr(port, "port", "unknown")),
+        )
+
+    NexArm.__init__ = traced_init
+
+    old_state = NexArm.state
+
+    @wraps(old_state)
+    def traced_state(self, *args, **kwargs):
+        result = old_state(self, *args, **kwargs)
+        record("STATE", state=result)
+        return result
+
+    NexArm.state = traced_state
+
+    def wrap_method(name):
+        original = getattr(NexArm, name, None)
+        if original is None:
+            return
+
+        @wraps(original)
+        def traced(self, *args, **kwargs):
+            record(
+                "CALL",
+                method=name,
+                args=args,
+                kwargs={
+                    k: v for k, v in kwargs.items()
+                    if k != "monitor"
+                },
+            )
+            try:
+                result = original(self, *args, **kwargs)
+            except BaseException as exc:
+                record("ERROR", method=name, error=repr(exc))
+                raise
+            record("RETURN", method=name, result=result)
+            return result
+
+        setattr(NexArm, name, traced)
+
+    for name in ("plan", "execute", "execute_joints"):
+        wrap_method(name)
+
+    NexArm._kitrescue_trace_ready = True
+    record(
+        "RUN_START",
+        argv=sys.argv,
+        note="Host timestamps. TX_RETURN is not a device acknowledgement.",
+    )
+    print("Run log:", path, flush=True)
+    return path
+
+
 def main():
+    enable_run_logging()
     import sys
 
     if (

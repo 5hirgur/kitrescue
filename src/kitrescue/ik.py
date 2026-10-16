@@ -187,6 +187,153 @@ class NexArm:
         self.close()
 
 
+    def execute_joints(self, plan, monitor=None):
+        """Execute explicit IK joint targets through direct servo-register writes."""
+        import math
+        import time
+
+        if getattr(self, "_joint_busy", False):
+            raise RuntimeError("Another joint command is active")
+        if not callable(getattr(self.board, "bus_servo_set_position", None)):
+            raise RuntimeError("SDK does not expose direct servo writes")
+
+        self._joint_busy = True
+        try:
+            current = self.state()
+            for key in ("x", "y", "z", "pitch", "roll"):
+                if abs(current[key] - plan["before"][key]) > 3:
+                    raise RuntimeError("Pose changed after planning; replan")
+
+            target = dict(plan["target"])
+            if target["z"] < 5 or not -90 <= target["roll"] <= 90:
+                raise RuntimeError("Target violates floor/wrist bounds")
+
+            start = list(current["servos"])
+            goals = list(plan["solution"]["servos"])
+            if len(start) != 6 or len(goals) != 6:
+                raise RuntimeError("Six measured and target joints required")
+
+            if any(
+                not math.isfinite(float(v))
+                or int(v) != v
+                or not 0 <= v <= 4095
+                for v in start + goals
+            ):
+                raise RuntimeError("Invalid joint positions")
+
+            start = list(map(int, start))
+            goals = list(map(int, goals))
+
+            anchor = getattr(self, "last_target", None) or plan["before"]
+            stationary_arm = all(
+                abs(target[k] - anchor[k]) < .05
+                for k in ("x", "y", "z", "pitch")
+            )
+
+            if stationary_arm:
+                # Wrist/gripper-only: hold the actual shoulder/elbow/pitch.
+                goals[:4] = start[:4]
+
+            largest = max(
+                abs(a - b)
+                for a, b in zip(start[:5], goals[:5])
+            )
+            if largest > 128:
+                raise RuntimeError(
+                    "Joint segment exceeds 128 ticks; no command sent"
+                )
+
+            distance = math.dist(
+                [current[k] for k in ("x", "y", "z")],
+                [target[k] for k in ("x", "y", "z")],
+            )
+            if stationary_arm:
+                distance = 0
+
+            near = min(current["z"], target["z"]) < 100
+            seconds = max(
+                .8,
+                2 * largest / (160 if near else 240),
+                2 * distance / (10 if near else 35),
+                abs(goals[5] - start[5]) / 400,
+            )
+
+            # Default 5000 uses this profile; larger values slow it down.
+            scale = max(1., float(target.get("time_ms", 5000)) / 5000)
+            duration = int(math.ceil(seconds * scale * 1000))
+            if duration > 10000:
+                raise RuntimeError(
+                    "Segment requires over 10 seconds; replan"
+                )
+            target["time_ms"] = duration
+
+            if monitor is not None:
+                monitor(current)
+
+            print(
+                f"  joint goal window: {duration} ms; "
+                f"largest arm change {largest} ticks",
+                flush=True,
+            )
+            # Address only joints whose targets actually change.
+            for index, goal in enumerate(goals):
+                delta = abs(goal - start[index])
+                if delta <= 2:
+                    continue
+                speed = max(
+                    20,
+                    min(
+                        240,
+                        int(math.ceil(2 * delta * 1000 / duration)),
+                    ),
+                )
+                self.board.bus_servo_set_position(
+                    servo_id=index + 1,
+                    position=goal,
+                    acc=10,
+                    speed=speed,
+                )
+            self.claw_target = target["claw"]
+            self.last_target = dict(target)
+
+            deadline = time.monotonic() + duration / 1000 + .7
+            state = current
+
+            while time.monotonic() < deadline:
+                time.sleep(min(
+                    .1, max(0., deadline - time.monotonic())
+                ))
+                state = self.state()
+
+                for i in range(5):
+                    lo = min(start[i], goals[i]) - 40
+                    hi = max(start[i], goals[i]) + 40
+                    if not lo <= state["servos"][i] <= hi:
+                        raise RuntimeError(
+                            f"Joint {i+1} left its commanded range: "
+                            f"{state['servos'][i]}, expected {lo}..{hi}. "
+                            "No next command sent; active movement "
+                            "may still finish."
+                        )
+
+                if monitor is not None:
+                    monitor(state)
+
+            errors = [
+                state["servos"][i] - goals[i] for i in range(5)
+            ]
+            if max(map(abs, errors)) > 40:
+                raise RuntimeError(
+                    f"Joint endpoint error: {errors}; "
+                    "no next command sent"
+                )
+
+            return state
+        finally:
+            self._joint_busy = False
+
+
+
 def display_plan(plan):
     print("Before:")
     pprint(plan["before"])
