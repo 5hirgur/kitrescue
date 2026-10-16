@@ -129,7 +129,7 @@ class Motion:
                 "tolerance": {
                     "x": FEEDBACK_TOLERANCES["contact_xy_mm"] if precise else FEEDBACK_TOLERANCES["travel_mm"],
                     "y": FEEDBACK_TOLERANCES["contact_xy_mm"] if precise else FEEDBACK_TOLERANCES["travel_mm"],
-                    "z": FEEDBACK_TOLERANCES["contact_z_mm"] if precise else self.travel_tolerance("z", before, target),
+                    "z": FEEDBACK_TOLERANCES["contact_z_mm"] if precise else self.empty_retract_z_tolerance(label, before, target),
                     "pitch": FEEDBACK_TOLERANCES["pitch_deg"],
                     "roll": FEEDBACK_TOLERANCES["roll_deg"],
                 },
@@ -228,7 +228,7 @@ class Motion:
             allowed = {
                 "x": FEEDBACK_TOLERANCES["contact_xy_mm"] if precise else FEEDBACK_TOLERANCES["travel_mm"],
                 "y": FEEDBACK_TOLERANCES["contact_xy_mm"] if precise else FEEDBACK_TOLERANCES["travel_mm"],
-                "z": FEEDBACK_TOLERANCES["contact_z_mm"] if precise else self.travel_tolerance("z", before, target),
+                "z": FEEDBACK_TOLERANCES["contact_z_mm"] if precise else self.empty_retract_z_tolerance(label, before, target),
                 "pitch": FEEDBACK_TOLERANCES["pitch_deg"],
                 "roll": FEEDBACK_TOLERANCES["roll_deg"],
             }
@@ -249,10 +249,18 @@ class Motion:
             required_progress = abs(dz) / 2
             if getattr(self.r, "fast_motion", False) and allowed["z"] == 16:
                 required_progress = max(5, abs(dz) - allowed["z"])
-            if abs(dz) >= 15 and progress < required_progress:
-                raise RuntimeError(
-                    "Insufficient measured vertical progress"
-                )
+            empty_retract_progress = required_progress
+            if (
+                getattr(self.r, "fast_motion", False)
+                and label.startswith("retract:")
+                and dz > 0
+                and target["claw"] == -80
+                and abs(after["claw"] + 80) <= 5
+            ):
+                empty_retract_progress = max(5, abs(dz) - allowed["z"])
+
+            if abs(dz) >= 15 and progress < empty_retract_progress:
+                raise RuntimeError("Insufficient measured vertical progress")
 
             if minimum is not None and after["z"] < minimum:
                 raise RuntimeError(
@@ -692,5 +700,17 @@ class Motion:
                 and min(before["z"], target["z"]) >= self.r.base["z"] + 50):
             return 16
         return FEEDBACK_TOLERANCES["travel_mm"]
+
+
+    def empty_retract_z_tolerance(self, label, before, target):
+        if (
+            getattr(self.r, "fast_motion", False)
+            and label.startswith("retract:")
+            and target["claw"] == -80
+            and abs(before["claw"] + 80) <= 5
+        ):
+            return 16
+        return self.travel_tolerance("z", before, target)
+
 
 

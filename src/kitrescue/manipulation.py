@@ -57,6 +57,8 @@ class Perception:
 
             frame = self.camera.capture()
             image = prepare_image(frame, self.config)
+            if callable(getattr(self, "frame_observer", None)):
+                self.frame_observer(image)
             records, overlay = detect_top_faces(
                 image, self.profile, self.cal
             )
@@ -399,9 +401,11 @@ class WorkspaceView:
                             [image.shape[1], image.shape[0]],
                         )
 
+                        if callable(getattr(vision, "preview_overlay", None)):
+                            image = vision.preview_overlay(image)
                         ok, encoded = cv2.imencode(
                             ".jpg",
-                            image[lo[1]:hi[1], lo[0]:hi[0]],
+                            (image if getattr(vision, "preview_full_frame", False) else image[lo[1]:hi[1], lo[0]:hi[0]]),
                         )
                         if not ok:
                             raise RuntimeError(
