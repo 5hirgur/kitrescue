@@ -789,9 +789,9 @@ class KitRescue:
     def controller(self):
         if not hasattr(self, "_motion_controller"):
             try:
-                from .motion import Motion
+                from .smooth_motion import Motion
             except ImportError:
-                from motion import Motion
+                from smooth_motion import Motion
             self._motion_controller = Motion(self)
         return self._motion_controller
 
@@ -1014,12 +1014,23 @@ class KitRescue:
             with self.vision.lock:
                 self.vision.paused = True
             try:
+                group = []
                 for step in route:
+                    if step["action"] in ("close", "release"):
+                        if group:
+                            if step_mode:
+                                input("Path ready; hands clear, Enter: ")
+                            self.controller().follow_path(group)
+                            group = []
+                        if step_mode:
+                            input(f"{step['action']}; hands clear, Enter: ")
+                        self.move(step)
+                    else:
+                        group.append(step)
+                if group:
                     if step_mode:
-                        input(
-                            f"{step['action']}; hands clear, Enter: "
-                        )
-                    self.move(step)
+                        input("Return path ready; hands clear, Enter: ")
+                    self.controller().follow_path(group)
             finally:
                 with self.vision.lock:
                     self.vision.paused = False

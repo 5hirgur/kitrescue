@@ -135,84 +135,7 @@ class Motion:
         ):
             floor = max(floor, minimum)
 
-        def monitor(s):
-            readings.append(dict(s))
-            del readings[:-80]
-
-            if not all(
-                math.isfinite(float(s[k])) for k in FIELDS
-            ):
-                raise RuntimeError("Invalid feedback")
-
-            if s["z"] < floor or not -90 <= s["roll"] <= 90:
-                raise RuntimeError(
-                    f"Clearance/wrist deviation: "
-                    f"Z={s['z']}, floor={floor}"
-                )
-
-            # Command-anchored transfers: bounded raised transients.
-            transient = (
-                10 if not maintenance and min(
-                    before["z"], target["z"], s["z"]
-                ) >= self.r.base["z"] + 50 else 6
-            )
-            pitch_lo = min(
-                before["pitch"], target["pitch"]
-            ) - transient
-            pitch_hi = max(
-                before["pitch"], target["pitch"]
-            ) + transient
-            if not pitch_lo <= s["pitch"] <= pitch_hi:
-                raise RuntimeError(
-                    "Pitch left the commanded transition"
-                )
-
-            if (
-                not maintenance
-                and abs(s["pitch"] - self.r.base["pitch"]) > transient
-            ):
-                raise RuntimeError("Top-down pitch deviation")
-
-            if maintenance and hasattr(self, "pitch_limits"):
-                low, high = self.pitch_limits
-                if label == "park_pitch":
-                    if min(
-                        before["z"], target["z"], s["z"]
-                    ) < self.clearance:
-                        raise RuntimeError(
-                            "Pitch alignment requires raised clearance"
-                        )
-                    if not low <= target["pitch"] <= high:
-                        raise RuntimeError(
-                            "Requested pitch outside controller limits"
-                        )
-                    if not low <= before["pitch"] <= high:
-                        if (
-                            abs(
-                                before["pitch"] - self.r.base["pitch"]
-                            ) > 15
-                            or abs(before["claw"] + 80) > 5
-                        ):
-                            raise RuntimeError(
-                                "Invalid raised alignment start"
-                            )
-                        low = min(low, before["pitch"] - 6)
-                        high = max(high, before["pitch"] + 6)
-                if not low <= s["pitch"] <= high:
-                    raise RuntimeError(
-                        "Pitch left the allowed alignment envelope"
-                    )
-
-            roll_lo = min(
-                before["roll"], target["roll"]
-            ) - 5
-            roll_hi = max(
-                before["roll"], target["roll"]
-            ) + 5
-            if not roll_lo <= s["roll"] <= roll_hi:
-                raise RuntimeError(
-                    "Wrist left the commanded transition"
-                )
+        monitor = self.make_monitor(before, target, label, maintenance, minimum, readings)
 
         try:
             # One command, then feedback. No automatic motion retry.
@@ -633,3 +556,95 @@ class Motion:
             20 if axis == "z" else 10,
             minimum=self.clearance,
         )
+
+    def make_monitor(
+        self, before, target, label,
+        maintenance, minimum, readings,
+    ):
+        floor = max(5, min(before["z"], target["z"]) - 10)
+        if (
+            minimum is not None
+            and min(before["z"], target["z"]) >= minimum
+        ):
+            floor = max(floor, minimum)
+        def monitor(s):
+            readings.append(dict(s))
+            del readings[:-80]
+
+            if not all(
+                math.isfinite(float(s[k])) for k in FIELDS
+            ):
+                raise RuntimeError("Invalid feedback")
+
+            if s["z"] < floor or not -90 <= s["roll"] <= 90:
+                raise RuntimeError(
+                    f"Clearance/wrist deviation: "
+                    f"Z={s['z']}, floor={floor}"
+                )
+
+            # Command-anchored transfers: bounded raised transients.
+            transient = (
+                10 if not maintenance and min(
+                    before["z"], target["z"], s["z"]
+                ) >= self.r.base["z"] + 50 else 6
+            )
+            pitch_lo = min(
+                before["pitch"], target["pitch"]
+            ) - transient
+            pitch_hi = max(
+                before["pitch"], target["pitch"]
+            ) + transient
+            if not pitch_lo <= s["pitch"] <= pitch_hi:
+                raise RuntimeError(
+                    "Pitch left the commanded transition"
+                )
+
+            if (
+                not maintenance
+                and abs(s["pitch"] - self.r.base["pitch"]) > transient
+            ):
+                raise RuntimeError("Top-down pitch deviation")
+
+            if maintenance and hasattr(self, "pitch_limits"):
+                low, high = self.pitch_limits
+                if label == "park_pitch":
+                    if min(
+                        before["z"], target["z"], s["z"]
+                    ) < self.clearance:
+                        raise RuntimeError(
+                            "Pitch alignment requires raised clearance"
+                        )
+                    if not low <= target["pitch"] <= high:
+                        raise RuntimeError(
+                            "Requested pitch outside controller limits"
+                        )
+                    if not low <= before["pitch"] <= high:
+                        if (
+                            abs(
+                                before["pitch"] - self.r.base["pitch"]
+                            ) > 15
+                            or abs(before["claw"] + 80) > 5
+                        ):
+                            raise RuntimeError(
+                                "Invalid raised alignment start"
+                            )
+                        low = min(low, before["pitch"] - 6)
+                        high = max(high, before["pitch"] + 6)
+                if not low <= s["pitch"] <= high:
+                    raise RuntimeError(
+                        "Pitch left the allowed alignment envelope"
+                    )
+
+            roll_lo = min(
+                before["roll"], target["roll"]
+            ) - 5
+            roll_hi = max(
+                before["roll"], target["roll"]
+            ) + 5
+            if not roll_lo <= s["roll"] <= roll_hi:
+                raise RuntimeError(
+                    "Wrist left the commanded transition"
+                )
+
+        return monitor
+
