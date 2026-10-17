@@ -89,7 +89,7 @@ def detect_tray(image, outer_mm=(180, 140), height_mm=20):
     white = cv2.inRange(hsv, (0, 0, 120), (179, 100, 255))
     candidates = []
 
-    for low, high in ((30, 90), (50, 150), (80, 180)):
+    for low, high in ((10, 30), (20, 60), (30, 90), (50, 150), (80, 180)):
         edges = cv2.Canny(gray, low, high)
         closed = cv2.morphologyEx(
             edges,
@@ -106,6 +106,16 @@ def detect_tray(image, outer_mm=(180, 140), height_mm=20):
             cv2.DIST_L2,
             3,
         )
+
+        # Add closed white-region outlines when Canny contours fragment.
+        region = cv2.inRange(hsv, (0, 0, 155), (179, 50, 255))
+        region = cv2.morphologyEx(
+            region, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8)
+        )
+        region_contours, _ = cv2.findContours(
+            region, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        contours = list(contours) + list(region_contours)
 
         for contour in contours:
             area = cv2.contourArea(contour)
@@ -194,7 +204,21 @@ def detect_tray(image, outer_mm=(180, 140), height_mm=20):
                 1,
                 area_a + area_b - intersection,
             )
-            if overlap > 0.8:
+            containment = intersection / max(1, min(area_a, area_b))
+            area_ratio = min(area_a, area_b) / max(1, max(area_a, area_b))
+            centre_gap = np.linalg.norm(
+                item["points"].mean(axis=0)
+                - other["points"].mean(axis=0)
+            )
+            nested = (
+                containment > 0.95
+                and area_ratio > 0.60
+                and centre_gap < 0.05 * np.sqrt(max(area_a, area_b))
+                and abs(item["score"] - other["score"]) < 0.15
+            )
+            if overlap > 0.8 or nested:
+                if nested and area_a > area_b:
+                    other.update(item)
                 duplicate = True
                 break
 

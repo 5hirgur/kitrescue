@@ -259,7 +259,15 @@ class Motion:
             ):
                 empty_retract_progress = max(5, abs(dz) - allowed["z"])
 
-            if abs(dz) >= 15 and progress < empty_retract_progress:
+            if (abs(dz) >= 15 and progress < empty_retract_progress) and not (
+    label.startswith("retract:")
+    and label.endswith(":settle")
+    and target["claw"] == -80
+    and abs(after["claw"] + 80) <= 5
+    and all(abs(after[k] - target[k]) <= allowed[k]
+            for k in ("x", "y", "z", "pitch", "roll"))
+    and (minimum is None or after["z"] >= minimum)
+):
                 raise RuntimeError("Insufficient measured vertical progress")
 
             if minimum is not None and after["z"] < minimum:

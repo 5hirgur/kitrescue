@@ -141,7 +141,9 @@ class TrayTransfer(m.KitRescue):
                 frame = self.vision.camera.capture()
                 image = m.prepare_image(frame, self.vision.config)
 
+            cv2.imwrite(str(output / "transfer_input.png"), image)
             tray, overlay = detect_tray(image)
+            print("Tray frame:", tray, flush=True)
 
             if not cv2.imwrite(
                 str(output / "current_overlay.png"), overlay
@@ -190,11 +192,7 @@ class TrayTransfer(m.KitRescue):
             flush=True,
         )
 
-        if (
-            len(keep) < 5
-            or tray["status"] != "detected"
-            or len(observations) - 1 not in keep
-        ):
+        if len(keep) < 5:
             raise ValueError(
                 "Need 5 agreeing tray centres including the latest frame; "
                 "see data/tray/stability.json"

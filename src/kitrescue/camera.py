@@ -129,18 +129,74 @@ def get_controls(device, names):
 
 
 def set_controls(device, controls):
-    # Disable automatic control before changing the corresponding manual value.
-    switches = {k: v for k, v in controls.items()
-                if k in ("auto_exposure", "white_balance_automatic",
-                         "focus_automatic_continuous")}
+    """Apply saved controls; continue only after stable exact readback."""
+    import time
+
+    if not controls:
+        return {}
+
+    switches = {
+        k: v for k, v in controls.items()
+        if k in (
+            "auto_exposure",
+            "white_balance_automatic",
+            "focus_automatic_continuous",
+        )
+    }
     values = {k: v for k, v in controls.items() if k not in switches}
-    for group in (switches, values):
-        if group:
-            v4l(device, "--set-ctrl=" + ",".join(f"{k}={int(v)}" for k, v in group.items()))
-    actual = get_controls(device, list(controls))
-    if actual != controls:
-        raise RuntimeError(f"Camera settings differ: requested={controls}, actual={actual}")
-    return actual
+    actual = {}
+    last_error = None
+
+    for attempt in range(8):
+        try:
+            for group in (switches, values):
+                if group:
+                    v4l(device, "--set-ctrl=" + ",".join(
+                        f"{k}={int(v)}" for k, v in group.items()
+                    ))
+
+            # Reapply exposure/gain after other controls have settled.
+            time.sleep(0.25)
+            for key in ("exposure_time_absolute", "gain"):
+                if key in controls:
+                    v4l(device, f"--set-ctrl={key}={int(controls[key])}")
+
+            time.sleep(0.25)
+            actual = get_controls(device, list(controls))
+            if actual == controls:
+                time.sleep(0.25)
+                actual = get_controls(device, list(controls))
+                if actual == controls:
+                    return actual
+        except RuntimeError as exc:
+            last_error = str(exc)
+
+        print(f"Camera controls settling: attempt {attempt + 1}/8",
+              flush=True)
+
+    raise RuntimeError(
+        f"Camera controls did not settle: requested={controls}, "
+        f"actual={actual}; last_error={last_error}"
+    )
+
+
+
+def _webcam_device_index(device):
+    import os
+    import re
+
+    path = Path(device).resolve(strict=True)
+
+    if not os.access(path, os.R_OK | os.W_OK):
+        raise PermissionError(f"No camera access: {path}")
+
+    match = re.fullmatch(r"/dev/video(\d+)", str(path))
+    if not match:
+        raise ValueError(
+            f"Expected a V4L2 camera, got {path}"
+        )
+
+    return int(match.group(1))
 
 
 class WebcamCamera:
@@ -157,7 +213,7 @@ class WebcamCamera:
         self._error = None
         self._sequence = 0
         self._thread = None
-        self._cap = cv2.VideoCapture(self.device, cv2.CAP_V4L2)
+        self._cap = cv2.VideoCapture(_webcam_device_index(self.device), cv2.CAP_V4L2)
         try:
             if not self._cap.isOpened():
                 raise RuntimeError(f"Cannot open {self.device}; check connection, video group and other apps.")

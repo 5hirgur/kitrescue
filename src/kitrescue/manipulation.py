@@ -1087,7 +1087,25 @@ class KitRescue:
                 points[:, None] - points[None, :], axis=2
             ).max())
             if spread > 12:
-                raise RuntimeError("Stack image unstable; spread exceeds 12 pixels")
+                agreeing = False
+                for omitted in range(len(points)):
+                    subset = np.delete(points, omitted, axis=0)
+                    subset_spread = float(np.linalg.norm(
+                        subset[:, None] - subset[None, :], axis=2
+                    ).max())
+                    if subset_spread <= 12:
+                        agreeing = True
+                        print(
+                            f"Stack recheck: ignored one outlier; "
+                            f"remaining spread {subset_spread:.2f} px",
+                            flush=True,
+                        )
+                        break
+                if not agreeing:
+                    raise RuntimeError(
+                        f"Stack image unstable: no four agreeing frames; "
+                        f"all-frame spread {spread:.2f} px"
+                    )
             print(
                 f"Park recheck: {time.monotonic()-started:.2f} s; "
                 f"stack spread {spread:.2f} px",

@@ -257,6 +257,53 @@ def settled_feedback(arm, first, target, timeout=3.0, minimum_z=None):
     return readings[-1], readings, quiet
 
 
+
+def calibration_joint_move(arm, target, duration, minimum_z):
+    """Use the existing motion controller's guarded IK subdivision."""
+    from types import SimpleNamespace
+    from motion import Motion, FIELDS
+
+    saved = json.loads(
+        (ROOT / "config/robot_camera.json").read_text()
+    )
+    robot = SimpleNamespace(
+        arm=arm,
+        cal=saved,
+        base=dict(saved["reference"]),
+        park=dict(saved["park"]),
+        duration=duration,
+        fast_motion=False,
+        log_dir=ROOT / "data/calibration/motion",
+    )
+    controller = Motion(robot)
+    controller._slow_zone = None
+    state = arm.state()
+    if abs(state["pitch"] - robot.base["pitch"]) > 6:
+        controller.park()
+        state = arm.state()
+    if abs(state["pitch"] - robot.base["pitch"]) > 6:
+        raise RuntimeError("Top-down alignment not reached; stopped")
+    current = {key: state[key] for key in FIELDS}
+    # Keep commanded pitch fixed; measured error remains monitored.
+    current["pitch"] = robot.base["pitch"]
+    values = {key: target[key] for key in FIELDS}
+    if abs(values["pitch"] - robot.base["pitch"]) > 0.1:
+        raise RuntimeError("Calibration target is not top-down")
+
+    controller.interpolate(
+        current, values,
+        label="calibration",
+        maximum=10,
+        maintenance=False,
+        minimum=(
+            minimum_z
+            if minimum_z is not None and state["z"] >= minimum_z
+            else None
+        ),
+    )
+    return arm.state()
+
+
 def move(arm, target, duration, minimum_z=None):
     """Execute a full pose and verify either endpoint accuracy or travel clearance."""
     check_z(target, "Requested target")
@@ -290,7 +337,7 @@ def move(arm, target, duration, minimum_z=None):
     if "z" in plan["solution"]:
         check_z(plan["solution"], "IK endpoint")
 
-    first = arm.execute(plan)
+    first = calibration_joint_move(arm, target, duration, minimum_z)
 
     state, readings, settled = settled_feedback(
         arm,

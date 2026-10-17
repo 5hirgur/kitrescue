@@ -10,13 +10,13 @@
   "controls": {
     "power_line_frequency": 1,
     "white_balance_automatic": 0,
-    "gain": 228,
-    "white_balance_temperature": 2354,
+    "gain": 129,
+    "white_balance_temperature": 2888,
     "zoom_absolute": 100,
     "exposure_dynamic_framerate": 0,
     "focus_automatic_continuous": 0,
     "focus_absolute": 30,
     "auto_exposure": 1,
-    "exposure_time_absolute": 156
+    "exposure_time_absolute": 77
   }
 }
